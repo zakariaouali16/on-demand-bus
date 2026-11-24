@@ -1,0 +1,6 @@
+# secrets - never commit
+apikey.json
+.env
+__pycache__/
+# downloaded OpenStreetMap data (re-created automatically)
+data/

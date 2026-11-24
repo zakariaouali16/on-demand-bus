@@ -1,0 +1,267 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>On-Demand Bus Dispatcher</title>
+<style>
+  :root { --bg:#f4f5f7; --panel:#fff; --ink:#1d2330; --muted:#6b7280; --line:#e3e6eb; --accent:#0f62fe; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; background:var(--bg); color:var(--ink);
+         display:grid; grid-template-columns: 1fr 360px; height:100vh; }
+  #mapwrap { position:relative; padding:12px; min-width:0; }
+  canvas { width:100%; height:100%; background:#fff; border-radius:10px; border:1px solid var(--line); cursor:crosshair; display:block; }
+  #hint { position:absolute; left:24px; top:22px; background:rgba(255,255,255,.92); padding:6px 10px; border-radius:6px;
+          border:1px solid var(--line); font-size:13px; }
+  aside { background:var(--panel); border-left:1px solid var(--line); padding:16px; overflow:auto; }
+  h1 { font-size:17px; margin:0 0 2px; } h2 { font-size:12px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); margin:18px 0 8px; }
+  .clock { font-variant-numeric: tabular-nums; color:var(--muted); }
+  .grid { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+  .stat { background:var(--bg); border-radius:8px; padding:8px 10px; }
+  .stat b { display:block; font-size:18px; font-variant-numeric: tabular-nums; } .stat span { color:var(--muted); font-size:12px; }
+  label { display:flex; align-items:center; gap:8px; margin:6px 0; }
+  input[type=range] { flex:1; }
+  textarea { width:100%; min-height:56px; font:inherit; padding:8px; border:1px solid var(--line); border-radius:8px; resize:vertical; }
+  button { font:inherit; padding:7px 12px; border-radius:8px; border:1px solid var(--accent); background:var(--accent); color:#fff; cursor:pointer; }
+  button.ghost { background:#fff; color:var(--accent); }
+  #bookout { font-size:13px; margin-top:6px; color:var(--muted); white-space:pre-wrap; }
+  .fleet { font-size:13px; display:grid; gap:4px; }
+  .fleet .row { display:grid; grid-template-columns: 14px 54px 1fr 52px; gap:6px; align-items:center; }
+  .fleet .dot { width:12px; height:12px; border-radius:50%; }
+  .fleet .bar { height:6px; background:var(--line); border-radius:3px; overflow:hidden; }
+  .fleet .bar > div { height:100%; background:#8a3ffc; }
+  .muted { color:var(--muted); }
+  #events { font:12px/1.5 ui-monospace, Consolas, monospace; color:var(--muted); }
+  .legend { display:flex; flex-wrap:wrap; gap:10px; font-size:12px; color:var(--muted); }
+  .legend i { display:inline-block; width:10px; height:10px; margin-right:4px; vertical-align:-1px; }
+  @media (max-width: 800px) { body { grid-template-columns:1fr; grid-template-rows:60vh auto; height:auto; } }
+</style>
+</head>
+<body>
+<div id="mapwrap">
+  <canvas id="map"></canvas>
+  <div id="hint">Click the map to set a pickup point, then click again for the destination.</div>
+</div>
+<aside>
+  <h1>On-demand bus dispatcher</h1>
+  <div class="clock"><span id="city"></span> · <span id="clock">--:--</span></div>
+
+  <h2>Live metrics</h2>
+  <div class="grid" id="stats"></div>
+
+  <h2>Fleet</h2>
+  <div id="fleet" class="fleet"></div>
+
+  <h2>Demand forecast · next 30 min</h2>
+  <div id="forecast" style="font-size:13px"></div>
+
+  <h2>Book in plain language <span id="wxbadge"></span></h2>
+  <textarea id="booktext"></textarea>
+  <button id="bookbtn">Book trip</button>
+  <div id="bookout"></div>
+  <div id="places" style="font-size:12px;color:var(--muted);margin-top:8px"></div>
+
+  <h2>Simulation</h2>
+  <label>Speed <input type="range" id="speed" min="1" max="60" value="10"><span id="speedv">10×</span></label>
+  <label>Demand <input type="range" id="rate" min="0" max="300" step="10" value="60"><span id="ratev">60/h</span></label>
+  <label><input type="checkbox" id="auto" checked> Random customers</label>
+  <button class="ghost" id="pause">Pause</button>
+
+  <h2>Legend</h2>
+  <div class="legend">
+    <span><i style="background:#111;border-radius:50%"></i>Bus (load)</span>
+    <span><i style="background:#2e7d32"></i>Pickup station</span>
+    <span><i style="background:#c62828"></i>Drop-off station</span>
+    <span><i style="background:#f59e0b;border-radius:50%"></i>Waiting customer</span>
+    <span>— planned route</span><span>┄ walking</span>
+    <span><i style="background:rgba(138,63,252,.25);border-radius:50%"></i>Forecast demand (zone)</span>
+    <span><i style="background:#374151"></i>Depot</span>
+    <span><i style="background:#374151;border-radius:50%"></i>Bus on break (Z)</span>
+    <span><i style="background:#9ca3af;border-radius:50%"></i>Customer, no bus yet</span>
+  </div>
+
+  <h2>Dispatcher log</h2>
+  <div id="events"></div>
+</aside>
+<script>
+const COLORS = ["#0f62fe","#8a3ffc","#007d79","#d02670","#fa4d56","#198038","#b28600","#ee5396","#1192e8","#6929c4"];
+const cv = document.getElementById("map"), ctx = cv.getContext("2d");
+let net = null, st = null, clickOrigin = null;
+const pad = 30;
+
+function tf() {
+  const r = cv.getBoundingClientRect(), dpr = devicePixelRatio || 1;
+  const w = Math.round(r.width * dpr), hh = Math.round(r.height * dpr);
+  if (cv.width !== w || cv.height !== hh) { cv.width = w; cv.height = hh; }
+  const s = Math.min((r.width - 2*pad) / net.width, (r.height - 2*pad) / net.height);
+  const ox = (r.width - net.width * s) / 2, oy = (r.height - net.height * s) / 2;
+  return { s, ox, oy, dpr, h: r.height };
+}
+const P = (t, [x, y]) => [t.ox + x * t.s, t.h - (t.oy + y * t.s)];  // north up
+
+function line(t, a, b) { const [x0,y0]=P(t,a), [x1,y1]=P(t,b); ctx.beginPath(); ctx.moveTo(x0,y0); ctx.lineTo(x1,y1); ctx.stroke(); }
+
+function draw() {
+  if (!net) return;
+  const t = tf();
+  ctx.setTransform(t.dpr,0,0,t.dpr,0,0);
+  ctx.clearRect(0,0,cv.width,cv.height);
+  // roads
+  ctx.lineCap = "round";
+  for (const [a,b,major] of net.edges) { ctx.strokeStyle = major ? "#c9d0da" : "#e3e7ec"; ctx.lineWidth = major ? 4 : 2; line(t,a,b); }
+  // stations
+  ctx.fillStyle = "#b8c0cc";
+  for (const s of net.stations) { const [x,y]=P(t,s); ctx.fillRect(x-2.5,y-2.5,5,5); }
+  // forecast bubbles per zone (area ~ expected requests in the next 30 min)
+  if (st && st.zones) st.zones.forEach((z, i) => {
+    const [x,y] = P(t, net.zones[i].hub), r = 6 + 7 * Math.sqrt(z.forecast);
+    ctx.fillStyle = z.covered ? "rgba(138,63,252,.13)" : "rgba(218,30,40,.16)";
+    ctx.strokeStyle = z.covered ? "rgba(138,63,252,.45)" : "rgba(218,30,40,.6)"; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.arc(x,y,r,0,7); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = "#6929c4"; ctx.font = "bold 11px system-ui"; ctx.textAlign = "center";
+    ctx.fillText(z.forecast.toFixed(0), x, y - r - 3); ctx.textAlign = "start";
+  });
+  // depot
+  { const [x,y] = P(t, net.depot); ctx.fillStyle = "#374151"; ctx.fillRect(x-9,y-9,18,18);
+    ctx.fillStyle = "#fff"; ctx.font = "bold 11px system-ui"; ctx.textAlign="center"; ctx.textBaseline="middle";
+    ctx.fillText("D", x, y+.5); ctx.textAlign="start"; ctx.textBaseline="alphabetic";
+    ctx.fillStyle = "#374151"; ctx.font = "11px system-ui"; ctx.fillText("Depot", x+12, y+4); }
+  // landmarks
+  ctx.font = "11px system-ui"; ctx.fillStyle = "#4b5563";
+  for (const l of net.landmarks) { const [x,y]=P(t,l.xy); ctx.fillText(l.name, x+6, y-6); ctx.beginPath(); ctx.arc(x,y,3,0,7); ctx.fill(); }
+  if (!st) return;
+  // routes
+  for (const b of st.buses) {
+    const empty = b.stops.length === 0;
+    ctx.strokeStyle = COLORS[b.id % COLORS.length]; ctx.globalAlpha = empty ? .4 : .55; ctx.lineWidth = empty ? 2 : 3;
+    if (empty) ctx.setLineDash([6,5]);  // repositioning / going to depot
+    ctx.beginPath(); b.route.forEach((p,i)=>{ const [x,y]=P(t,p); i?ctx.lineTo(x,y):ctx.moveTo(x,y); }); ctx.stroke();
+    ctx.setLineDash([]); ctx.globalAlpha = 1;
+  }
+  // customers + walking legs
+  for (const r of st.requests) {
+    const col = r.bus == null ? "#9ca3af" : COLORS[r.bus % COLORS.length];
+    ctx.setLineDash([3,4]); ctx.lineWidth = 1.2; ctx.strokeStyle = col;
+    if (r.status === "assigned" && r.pickup) line(t, r.origin, r.pickup);
+    if (r.status !== "done" && r.dropoff) line(t, r.dropoff, r.dest);
+    ctx.setLineDash([]);
+    if (r.status === "pending" || r.status === "assigned") {
+      const [x,y]=P(t,r.origin); ctx.fillStyle = r.status==="pending" ? "#9ca3af" : "#f59e0b";
+      ctx.beginPath(); ctx.arc(x,y,4+r.pax,0,7); ctx.fill();
+    }
+    const [dx,dy]=P(t,r.dest); ctx.strokeStyle = col; ctx.lineWidth=1.5; ctx.strokeRect(dx-3,dy-3,6,6);
+  }
+  // stops
+  for (const b of st.buses) for (const s of b.stops) {
+    const [x,y]=P(t,s.xy); ctx.fillStyle = s.kind==="P" ? "#2e7d32" : "#c62828";
+    ctx.beginPath();
+    if (s.kind==="P") { ctx.moveTo(x,y-7); ctx.lineTo(x-6,y+4); ctx.lineTo(x+6,y+4); }
+    else { ctx.moveTo(x,y+7); ctx.lineTo(x-6,y-4); ctx.lineTo(x+6,y-4); }
+    ctx.fill();
+  }
+  // buses
+  for (const b of st.buses) {
+    const [x,y]=P(t,b.xy), col = COLORS[b.id % COLORS.length];
+    ctx.fillStyle = b.state === "break" ? "#374151" : col;
+    ctx.beginPath(); ctx.arc(x,y,11,0,7); ctx.fill();
+    if (b.state === "to_break") { ctx.strokeStyle = "#111"; ctx.setLineDash([3,2]); ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(x,y,14,0,7); ctx.stroke(); ctx.setLineDash([]); }
+    ctx.fillStyle="#fff"; ctx.font="bold 11px system-ui"; ctx.textAlign="center"; ctx.textBaseline="middle";
+    ctx.fillText(b.state === "break" ? "Z" : b.load, x, y+.5); ctx.textAlign="start"; ctx.textBaseline="alphabetic";
+  }
+  if (clickOrigin) { const [x,y]=P(t,clickOrigin); ctx.strokeStyle="#0f62fe"; ctx.lineWidth=2; ctx.beginPath(); ctx.arc(x,y,8,0,7); ctx.stroke(); }
+}
+
+const fmt = s => s == null ? "–" : (s/60).toFixed(1) + " min";
+function renderPanel() {
+  const m = st.metrics, s = m.status;
+  document.getElementById("clock").textContent = m.clock + (st.running ? "" : " (paused)");
+  document.getElementById("city").textContent = net.name;
+  const tiles = [
+    ["Waiting / on board", `${(s.assigned||0)+(s.pending||0)} / ${s.onboard||0}`],
+    ["Completed trips", s.done||0],
+    ["Served", m.served_pct.toFixed(0) + "%"],
+    ["Avg wait at stop", fmt(m.avg_wait_s)],
+    ["Avg door-to-door", fmt(m.avg_trip_s)],
+    ["Avg detour", m.avg_detour.toFixed(2) + "×"],
+    ["Avg walk", m.avg_walk_m.toFixed(0) + " m"],
+    ["Re-routed by optimiser", m.reassignments],
+  ];
+  document.getElementById("stats").innerHTML = tiles.map(([k,v]) => `<div class="stat"><b>${v}</b><span>${k}</span></div>`).join("");
+  const label = b => b.state === "break" ? `on break · ${Math.ceil(b.break_left/60)} min left`
+    : b.state === "to_break" ? (b.load || b.stops.length ? "finishing trips, then break" : "driving to depot for break")
+    : b.stops.length ? `${b.load}/${b.capacity} on board · ${b.stops.length} stops`
+    : ({coverage: "idle → covering a zone", demand: "idle → forecast hotspot", depot: "idle → waiting at depot", standby: "idle · standing by"}[b.task] || "idle");
+  document.getElementById("fleet").innerHTML = st.buses.map(b =>
+    `<div class="row"><span class="dot" style="background:${b.state==="break"?"#374151":COLORS[b.id%COLORS.length]}"></span>
+      <span>Bus ${b.id}</span><span class="muted">${label(b)}</span>
+      <span class="bar" title="${b.worked_h} h since last break"><div style="width:${Math.min(100, b.worked_h/3*100)}%"></div></span></div>`).join("")
+    + `<div class="muted" style="margin-top:4px">Bar = shift time since last break (3 h max) · breaks taken: ${m.breaks_taken} · zone coverage: ${m.coverage_pct.toFixed(0)}%</div>`;
+  const total = st.zones.reduce((a, z) => a + z.forecast, 0);
+  const mae = m.forecast_mae, f2 = v => v == null ? "–" : v.toFixed(2);
+  document.getElementById("forecast").innerHTML =
+    `<b>${total.toFixed(0)}</b> requests expected · source: ${m.forecast_source}<br>` +
+    `<span class="muted">Accuracy so far (avg error per zone per 15 min): watsonx ${f2(mae.watsonx)} · seasonal-naive ${f2(mae.naive)}</span>` +
+    (m.forecast_error ? `<br><span style="color:#b45309">${m.forecast_error}</span>` : "") +
+    `<br><span class="muted">Purple bubbles on the map = forecast per zone; red = no bus within 5 min.</span>`;
+  document.getElementById("events").innerHTML = st.events.join("<br>");
+}
+
+let synced = false;
+async function poll() {
+  try {
+    st = await (await fetch("/api/state")).json();
+    if (!synced) {  // show the server's current settings on the sliders
+      synced = true;
+      speed.value = st.speed; speedv.textContent = st.speed + "×";
+      rate.value = st.rate; ratev.textContent = st.rate + "/h";
+      auto.checked = st.auto_demand; pause.textContent = st.running ? "Pause" : "Resume";
+    }
+    renderPanel(); draw();
+  } catch (e) {}
+  setTimeout(poll, 250);
+}
+
+cv.addEventListener("click", async ev => {
+  const t = tf(), r = cv.getBoundingClientRect();
+  const x = (ev.clientX - r.left - t.ox) / t.s, y = (t.h - (ev.clientY - r.top) - t.oy) / t.s;
+  if (x < 0 || y < 0 || x > net.width || y > net.height) return;
+  const hint = document.getElementById("hint");
+  if (!clickOrigin) { clickOrigin = [x,y]; hint.textContent = "Now click the destination."; draw(); return; }
+  const res = await (await fetch("/api/requests", { method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({ origin: clickOrigin, dest: [x,y] }) })).json();
+  clickOrigin = null;
+  hint.textContent = res.status === "assigned"
+    ? `Trip #${res.id} → bus ${res.bus}, pickup in ${fmt(res.eta_pickup)}. Click again to book another.`
+    : `Trip #${res.id}: all buses busy, retrying… Click again to book another.`;
+});
+
+document.getElementById("bookbtn").onclick = async () => {
+  const out = document.getElementById("bookout"); out.textContent = "Asking watsonx…";
+  const resp = await fetch("/api/book", { method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({ text: document.getElementById("booktext").value }) });
+  const j = await resp.json();
+  if (!resp.ok) { out.textContent = "⚠ " + j.detail; return; }
+  const r = j.request, p = j.parsed;
+  out.textContent = `${p.origin} → ${p.destination}, ${p.passengers} pax\nParsed by: ${p.source}\n` +
+    (r.status === "assigned" ? `Bus ${r.bus} picks you up in ${fmt(r.eta_pickup)}` : "All buses busy – retrying");
+};
+
+const ctl = body => fetch("/api/control", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body) });
+speed.oninput = e => { speedv.textContent = e.target.value + "×"; ctl({ speed: +e.target.value }); };
+rate.oninput = e => { ratev.textContent = e.target.value + "/h"; ctl({ rate: +e.target.value }); };
+auto.onchange = e => ctl({ auto_demand: e.target.checked });
+pause.onclick = () => { ctl({ running: !st.running }); pause.textContent = st.running ? "Resume" : "Pause"; };
+addEventListener("resize", draw);
+
+(async () => {
+  net = await (await fetch("/api/network")).json();
+  document.getElementById("wxbadge").textContent = net.watsonx ? "· watsonx" : "· rules (watsonx off)";
+  const names = net.landmarks.map(l => l.name);
+  if (names.length >= 2) document.getElementById("booktext").value = `Two of us need to go from ${names[0]} to ${names[names.length > 4 ? 4 : 1]}`;
+  document.getElementById("places").textContent = "Known places: " + names.join(" · ");
+  poll();
+})();
+</script>
+</body>
+</html>
