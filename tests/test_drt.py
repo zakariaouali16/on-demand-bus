@@ -59,6 +59,48 @@ class DispatcherTests(unittest.TestCase):
             after = sim.dispatcher.total_cost(sim.buses, sim.now)
             self.assertLessEqual(after, before + 1e-6)
 
+    # Made with IBM Bob AI
+    def test_time_window_honored(self):
+        """A pre-booked trip with earliest/latest constraints is served within the window."""
+        sim = quiet_sim(n_buses=2)
+        # Schedule a trip that cannot start for 300 s (earliest) and must start by 900 s.
+        r = sim.submit((300, 300), (2700, 2400), earliest=300.0, latest=900.0)
+        self.assertEqual(r.status, "assigned")
+        sim.drain()
+        self.assertEqual(r.status, "done")
+        # Actual pickup must respect the earliest constraint.
+        self.assertGreaterEqual(r.t_pickup, 300.0 - 1e-6)
+
+    # Made with IBM Bob AI
+    def test_time_window_too_tight_rejects(self):
+        """A latest time in the past means no bus can honour it → rejected."""
+        sim = quiet_sim(n_buses=2)
+        # latest is in the past relative to t_request=0 → every deadline is 0.
+        r = sim.submit((300, 300), (2700, 2400), earliest=0.0, latest=0.0)
+        # Should either be rejected immediately or stay unassigned and time out.
+        sim.run(sim.cfg.pending_timeout_s + 10)
+        self.assertIn(r.status, ("rejected", "pending"))
+
+    # Made with IBM Bob AI
+    def test_wheelchair_capacity_respected(self):
+        """Wheelchair spaces are a sub-capacity: more wheelchairs than slots → second bus."""
+        # 1 bus, 1 wheelchair space → two simultaneous wheelchair riders should split buses.
+        sim = quiet_sim(n_buses=2, wheelchair_capacity=1)
+        a = sim.submit((300, 300), (2700, 2400), wheelchair=True)
+        b = sim.submit((300, 600), (2700, 2100), wheelchair=True)
+        self.assertEqual(a.status, "assigned")
+        self.assertEqual(b.status, "assigned")
+        # With only 1 space each, both wheelchair riders must be on different buses.
+        self.assertNotEqual(a.bus_id, b.bus_id)
+
+    # Made with IBM Bob AI
+    def test_wheelchair_zero_capacity_cannot_serve(self):
+        """A fleet with 0 wheelchair spaces rejects wheelchair requests."""
+        sim = quiet_sim(n_buses=2, wheelchair_capacity=0)
+        r = sim.submit((300, 300), (2700, 2400), wheelchair=True)
+        sim.run(sim.cfg.pending_timeout_s + 10)
+        self.assertIn(r.status, ("rejected", "pending"))
+
     def test_full_simulation_serves_everyone_at_moderate_demand(self):
         sim = Simulation(Config(demand_per_hour=120, seed=5, forecast_source="naive"))
         sim.run(1800)

@@ -61,6 +61,7 @@ class Dispatcher:
         node, t = bus.anchor(now)
         t0 = t
         load = bus.load
+        wload = bus.wheelchair_load  # Made with IBM Bob AI
         pick = {rid: reqs[rid].t_pickup for rid in bus.onboard}
         dwelling_here = bus.arrived and bus.next_node is None
         pax_time = penalty = 0.0
@@ -84,6 +85,10 @@ class Dispatcher:
                 load += r.passengers
                 if load > bus.capacity:
                     return None
+                if r.wheelchair:                     # Made with IBM Bob AI
+                    wload += 1
+                    if wload > bus.wheelchair_capacity:
+                        return None
                 pick[st.req_id] = t
             else:
                 ride = t - pick[st.req_id]
@@ -92,6 +97,8 @@ class Dispatcher:
                         return None
                     penalty += ride - r.max_ride
                 load -= r.passengers
+                if reqs[st.req_id].wheelchair:       # Made with IBM Bob AI
+                    wload -= 1
                 pax_time += t - r.t_request
             times.append(t)
         cost = (t - t0) + cfg.w_passenger * pax_time + SOFT_PENALTY * penalty
@@ -112,8 +119,15 @@ class Dispatcher:
         cfg = self.cfg
         out = []
         for node, walk in r.origin_cands:
-            ready = r.t_request + walk / cfg.walk_speed
-            out.append((Stop("P", r.id, node, ready, ready + cfg.max_wait_s), walk))
+            walk_ready = r.t_request + walk / cfg.walk_speed
+            # Time-window: passenger cannot board before `earliest` (if given).
+            # Made with IBM Bob AI
+            ready = max(walk_ready, r.earliest) if r.earliest is not None else walk_ready
+            # Time-window: `latest` overrides the config max_wait deadline (if tighter).
+            deadline = ready + cfg.max_wait_s
+            if r.latest is not None:
+                deadline = min(deadline, r.latest)
+            out.append((Stop("P", r.id, node, ready, deadline), walk))
         return out
 
     def dropoff_stops(self, r: Request) -> list[tuple[Stop, float]]:
@@ -126,6 +140,10 @@ class Dispatcher:
         to, cfg = self.net.to, self.cfg
         best: Insertion | None = None
         for bus in buses:
+            # Wheelchair requests need a bus with at least one free wheelchair space.
+            # Made with IBM Bob AI
+            if r.wheelchair and bus.wheelchair_load >= bus.wheelchair_capacity:
+                continue
             anchor, t_anchor = bus.anchor(now)
             # Prune buses that can't reach any pickup station in time even directly.
             if all(t_anchor + to[p.node][anchor] > p.deadline for p, _ in p_cands):
@@ -170,6 +188,8 @@ class Dispatcher:
 
     def assign(self, r: Request, ins: Insertion) -> None:
         ins.bus.schedule = ins.schedule
+        if r.wheelchair:                 # Made with IBM Bob AI
+            ins.bus.wheelchair_load += 1
         r.status = "assigned"
         r.bus_id = ins.bus.id
         r.pickup_node, r.dropoff_node = ins.pickup.node, ins.dropoff.node

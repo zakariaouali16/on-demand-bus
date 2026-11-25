@@ -48,7 +48,9 @@ class Simulation:
         self.requests: dict[int, Request] = {}
         self.dispatcher = Dispatcher(self.net, self.stations, self.requests, cfg)
         start = self.rng.sample(self.stations.nodes, cfg.n_buses)
-        self.buses = [Bus(i, cfg.capacity, n) for i, n in enumerate(start)]
+        self.buses = [Bus(i, cfg.capacity, n,
+                          wheelchair_capacity=cfg.wheelchair_capacity)  # Made with IBM Bob AI
+                      for i, n in enumerate(start)]
         self.now = 0.0
         self.auto_demand = auto_demand
         self._next_id = 0
@@ -76,8 +78,13 @@ class Simulation:
         for o, d, pax in self.demand.sample_trips(self.now, dt):
             self.submit(o, d, pax)
 
-    def submit(self, origin, dest, passengers: int = 1, label: str = "") -> Request:
-        r = Request(self._next_id, tuple(origin), tuple(dest), self.now, passengers, label)
+    def submit(self, origin, dest, passengers: int = 1, label: str = "",
+               wheelchair: bool = False,          # Made with IBM Bob AI
+               earliest: float | None = None,     # Made with IBM Bob AI
+               latest: float | None = None) -> Request:  # Made with IBM Bob AI
+        r = Request(self._next_id, tuple(origin), tuple(dest), self.now,
+                    passengers, wheelchair=wheelchair, label=label,
+                    earliest=earliest, latest=latest)
         self._next_id += 1
         self.requests[r.id] = r
         self.dispatcher.prepare(r)
@@ -192,6 +199,8 @@ class Simulation:
         else:
             r.status, r.t_dropoff = "done", t
             bus.onboard.pop(r.id, None)
+            if r.wheelchair:                                      # Made with IBM Bob AI
+                bus.wheelchair_load = max(0, bus.wheelchair_load - 1)
 
     def _update_etas(self) -> None:
         for b in self.buses:

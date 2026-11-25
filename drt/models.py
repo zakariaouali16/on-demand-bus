@@ -47,6 +47,8 @@ class Config:
     break_s: float = 30 * 60          # ... then takes a 30 min break at the depot
     break_grace_s: float = 30 * 60    # may postpone a break this long if many are off
     max_on_break: int = 2             # at most this many buses off at the same time
+    # Accessibility — Made with IBM Bob AI
+    wheelchair_capacity: int = 2      # wheelchair spaces per bus (≤ capacity)
 
 
 @dataclass(frozen=True)
@@ -65,7 +67,14 @@ class Request:
     dest: tuple[float, float]
     t_request: float
     passengers: int = 1
+    wheelchair: bool = False   # True → occupies one wheelchair space — Made with IBM Bob AI
     label: str = ""
+    # Optional time-window for scheduled/pre-booked trips (seconds since sim start).
+    # earliest: passenger cannot board before this time (overrides walking-time ready).
+    # latest:   if the bus cannot pick up by this time, the request is rejected.
+    # Made with IBM Bob AI
+    earliest: float | None = None
+    latest: float | None = None
     status: str = "pending"   # pending | assigned | onboard | done | rejected
     bus_id: int | None = None
     pickup_node: Node | None = None
@@ -95,6 +104,8 @@ class Bus:
     dwell_until: float = 0.0
     arrived: bool = False              # already dwelling at self.node
     reposition: Node | None = None     # idle bus heading somewhere useful
+    wheelchair_capacity: int = 2       # wheelchair spaces available on this bus — Made with IBM Bob AI
+    wheelchair_load: int = 0           # wheelchair spaces currently in use — Made with IBM Bob AI
     state: str = "service"             # service | to_break | break
     task: str = ""                     # why an idle bus is moving: coverage | demand | depot
     worked_s: float = 0.0              # time since last break

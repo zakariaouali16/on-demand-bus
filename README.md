@@ -80,6 +80,8 @@ fallback takes over automatically.
 | Stations | Virtual stations about 350 m apart, on real intersections (busier ones preferred, landmarks always included). Each customer gets up to 3 candidate stations within `max_walk_m` at both ends. | `drt/stations.py` |
 | Insertion | For every bus × pickup station × drop-off station × position in the stop list, simulate the route and keep the cheapest option. Cost = bus time + passenger time + 1.5 × walking time. | `Dispatcher.best_insertion` |
 | Promises | Hard limits: capacity, max wait at the station (10 min), max ride (1.8× direct car time, or direct + 5 min). A new customer is refused if accepting them would make an already-booked customer late. | `Dispatcher.plan` |
+| Time windows *(Made with IBM Bob AI)* | Pre-booked trips can specify an `earliest` pickup time (passenger not ready before then) and a `latest` pickup deadline (request is rejected if no bus can honour it). Both are enforced as hard constraints during insertion and planning. | `Dispatcher.pickup_stops`, `Dispatcher.plan` |
+| Wheelchair seats *(Made with IBM Bob AI)* | Each bus has a `wheelchair_capacity` sub-capacity (default 2). Requests marked `wheelchair=True` consume one wheelchair space. The planner rejects a bus whose wheelchair spaces are full before trying to insert, and releases the space on drop-off. | `Dispatcher.plan`, `Dispatcher.best_insertion` |
 | Re-optimise | Every 60 s, all not-yet-boarded customers are removed and re-inserted, possibly on another bus or with a new drop-off station. The new plan is kept only if it is cheaper. A pickup station is never changed once given, because the customer is already walking there. | `Dispatcher.reoptimize` |
 | Zones + demand | Stations are grouped into 8 zones. Demand follows the time of day: the downtown core attracts trips in the morning, residential zones in the evening, with peaks at 08:00 and 17:30. 6 days of history are generated for the forecaster. | `drt/demand.py` |
 | Forecast | Every 15 min, the last 512 slots per zone go to watsonx `time_series/forecast` (`ibm/granite-ttm-512-96-r2`), which predicts the next hour. The built-in fallback forecast (same slot on previous days, scaled to today) is used if watsonx is unavailable. Both are scored against what actually happens. | `drt/forecast.py` |
@@ -152,6 +154,22 @@ drt/
 tests/test_drt.py
 ```
 
+## Submitting requests with new options *(Made with IBM Bob AI)*
+
+```python
+# Pre-booked trip: passenger wants pickup between t=300 s and t=900 s
+sim.submit(origin, dest, earliest=300.0, latest=900.0)
+
+# Wheelchair passenger (occupies one wheelchair space on the bus)
+sim.submit(origin, dest, wheelchair=True)
+
+# Configure wheelchair spaces per bus (default 2) in Config
+cfg = Config(wheelchair_capacity=1)
+```
+
+`Config.wheelchair_capacity` sets the number of wheelchair spaces fitted to every
+bus in the fleet. Set it to `0` to model a fleet with no accessible vehicles.
+
 ## Next steps
 
 - **Book any address**: geocode free-text addresses (e.g. with `osmnx.geocode`)
@@ -162,6 +180,3 @@ tests/test_drt.py
   re-optimiser adapts automatically.
 - **Scale**: for large fleets, limit insertion to the K nearest buses, or replace
   the insertion step with OR-Tools or a dial-a-ride solver.
-- **IBM Bob**: open this folder in IBM Bob to extend it. Point it at
-  `dispatcher.py` and the tests and ask for features such as time windows for
-  scheduled trips or wheelchair seats.
